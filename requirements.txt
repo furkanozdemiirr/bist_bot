@@ -1,0 +1,6 @@
+yfinance
+python-telegram-bot
+anthropic
+requests
+pandas
+numpy
