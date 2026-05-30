@@ -38,9 +38,10 @@ import anthropic
 # ⚙️  AYARLAR  — bunları doldurun!
 # ─────────────────────────────────────────
 
-BOT_TOKEN      = "8412980491:AAFQdm_A8OWOpf70JwlKKHYN_QDe4IVsygw"        # @BotFather'dan alın
-CHAT_ID        = "628255204"          # @userinfobot'tan alın
-CLAUDE_API_KEY = "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"   # console.anthropic.com'dan alın
+import os
+BOT_TOKEN      = os.environ.get("BOT_TOKEN")
+CHAT_ID        = os.environ.get("CHAT_ID")
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")
 
 TZ = ZoneInfo("Europe/Istanbul")
 
