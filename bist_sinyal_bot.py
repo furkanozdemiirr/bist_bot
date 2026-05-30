@@ -585,7 +585,7 @@ async def gunluk_ozet(app):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *BIST 100 Paper Trading Botu*\n\n"
-        "🌐 Dashboard: Railway URL'inden görüntüle\n\n"
+        "🌐 [Dashboard → bistbot-production.up.railway.app](https://bistbot-production.up.railway.app)\n\n"
         "/portfoy — Anlık portföy\n"
         "/islemler — Son işlemler\n"
         "/performans — Genel performans\n"
