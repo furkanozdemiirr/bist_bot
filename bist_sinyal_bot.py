@@ -1,34 +1,25 @@
 """
-BIST 100 Paper Trading Botu
-============================
-- BIST 100 hisselerini sürekli tarar
-- AL sinyalinde sanal alım, SAT sinyalinde sanal satım yapar
-- 50.000₺ sanal başlangıç bakiyesi
-- %0.1 komisyon (gerçekçilik için)
-- Telegram üzerinden portföy takibi
-- Hafta sonu çalışmaz
-
-Komutlar:
-    /portfoy     → Anlık portföy durumu
-    /islemler    → Son işlemler
-    /performans  → Genel performans özeti
-    /sinyal GARAN → Tek hisse analiz
-    /rapor       → Tüm BIST100 özet
-    /sifirla     → Portföyü sıfırla (dikkat!)
+BIST 100 Paper Trading Botu + Web Dashboard
+=============================================
+- BIST 100 hisselerini 15 dakikada bir tarar
+- AL/SAT sinyalinde sanal işlem yapar
+- Flask web dashboard ile anlık takip
+- Telegram bildirimleri
 """
 
 import asyncio
 import logging
 import os
-import json
+import threading
 import requests
 import pandas as pd
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 import yfinance as yf
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import anthropic
+from flask import Flask, render_template_string
 
 # ─────────────────────────────────────────
 # ⚙️  AYARLAR
@@ -37,469 +28,614 @@ import anthropic
 BOT_TOKEN      = os.environ.get("BOT_TOKEN")
 CHAT_ID        = os.environ.get("CHAT_ID")
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")
+PORT           = int(os.environ.get("PORT", 8080))
 
 TZ = ZoneInfo("Europe/Istanbul")
 
-BASLANGIC_BAKIYE = 50_000.0   # Sanal başlangıç bakiyesi (₺)
-KOMISYON_ORANI   = 0.001       # %0.1 komisyon
-MAX_POZISYON_PCT = 0.10        # Tek hisseye max %10 sermaye
-TARAMA_ARALIK    = 15 * 60     # Her 15 dakikada bir tara (saniye)
+BASLANGIC_BAKIYE = 50_000.0
+KOMISYON_ORANI   = 0.001
+MAX_POZISYON_PCT = 0.10
+TARAMA_ARALIK    = 15 * 60
 
 # ─────────────────────────────────────────
-# 📋  BIST 100 LİSTESİ
+# 📋  BIST 100
 # ─────────────────────────────────────────
 
-BIST100 = [
-    "AEFES", "AGESA", "AKBNK", "AKFEN", "AKGRT", "AKSEN", "ALARK", "ALBRK", "ALFAS", "ARCLK",
-    "ASELS", "ASTOR", "AVGYO", "AYDEM", "BIMAS", "BRSAN", "BRYAT", "BTCIM", "BUCIM", "CIMSA",
-    "CWENE", "DOAS", "DOHOL", "DSTKF", "DYNMO", "ECILC", "EGEEN", "EKGYO", "ENJSA", "ENKAI",
-    "EREGL", "FROTO", "GARAN", "GESAN", "GLYHO", "GUBRF", "GWIND", "HALKB", "HEKTS", "IPEKE",
-    "ISCTR", "ISDMR", "ISGYO", "ISFIN", "ISMEN", "KARSN", "KCHOL", "KONTR", "KONYA", "KORDS",
-    "KOZAA", "KOZAL", "KRDMD", "KTLEV", "LOGO", "MAVI", "MGROS", "MPARK", "NETAS", "ODAS",
-    "OTKAR", "OYAKC", "PETKM", "PGSUS", "POLHO", "PRKAB", "QUAGR", "REEDR", "SAHOL", "SASA",
-    "SELEC", "SILVR", "SISE", "SKBNK", "SMRTG", "SNGYO", "SOKM", "TAVHL", "TCELL", "THYAO",
-    "TKFEN", "TKNSA", "TOASO", "TRGYO", "TRALT", "TTKOM", "TTRAK", "TUKAS", "TUPRS", "TURSG",
-    "ULKER", "USDTR", "VAKBN", "VESBE", "VESTL", "YKBNK", "YATAS", "YEOTK", "ZOREN", "AKBNK",
-]
-BIST100 = list(dict.fromkeys(BIST100))  # Tekrarları kaldır
+BIST100 = list(dict.fromkeys([
+    "AEFES","AGESA","AKBNK","AKFEN","AKGRT","AKSEN","ALARK","ALBRK","ARCLK",
+    "ASELS","ASTOR","AVGYO","AYDEM","BIMAS","BRSAN","BRYAT","BTCIM","BUCIM","CIMSA",
+    "CWENE","DOAS","DOHOL","DSTKF","DYNMO","ECILC","EKGYO","ENJSA","ENKAI",
+    "EREGL","FROTO","GARAN","GESAN","GLYHO","GUBRF","GWIND","HALKB","HEKTS",
+    "ISCTR","ISDMR","ISGYO","KARSN","KCHOL","KONTR","KONYA","KORDS",
+    "KOZAA","KOZAL","KRDMD","LOGO","MAVI","MGROS","MPARK","NETAS","ODAS",
+    "OTKAR","OYAKC","PETKM","PGSUS","POLHO","SAHOL","SASA",
+    "SISE","SKBNK","SOKM","TAVHL","TCELL","THYAO",
+    "TKFEN","TOASO","TRALT","TTKOM","TTRAK","TUPRS",
+    "ULKER","VAKBN","VESBE","VESTL","YKBNK","ZOREN",
+]))
 
 # ─────────────────────────────────────────
-# 💼  SANAL PORTFÖY
+# 💼  SANAL PORTFÖY (Global State)
 # ─────────────────────────────────────────
 
 portfoy = {
-    "bakiye":     BASLANGIC_BAKIYE,
-    "baslangic":  BASLANGIC_BAKIYE,
+    "bakiye":      BASLANGIC_BAKIYE,
+    "baslangic":   BASLANGIC_BAKIYE,
     "pozisyonlar": {},
-    # {"GARAN": {"adet": 100, "maliyet": 130.5, "tarih": "..."}}
+    "baslangic_tarihi": datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
 }
-
 islem_gecmisi = []
-# [{"tip": "AL", "sembol": "GARAN", "adet": 100, "fiyat": 130.5, "tarih": "..."}]
 
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-
 # ─────────────────────────────────────────
-# 🛡️  YARDIMCI FONKSİYONLAR
+# 🛡️  YARDIMCI
 # ─────────────────────────────────────────
 
-def hafta_ici_mi() -> bool:
+def hafta_ici_mi():
     return datetime.now(TZ).weekday() < 5
 
-def borsa_acik_mi() -> bool:
-    """BIST 10:00-18:00 arası açık (hafta içi)."""
+def borsa_acik_mi():
     if not hafta_ici_mi():
         return False
     simdi = datetime.now(TZ).time()
     return dtime(10, 0) <= simdi <= dtime(18, 0)
 
-def simdi_str() -> str:
+def simdi_str():
     return datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
 
-def son_fiyat_al(sembol: str) -> float | None:
+def son_fiyat_al(sembol):
     try:
-        ticker = yf.Ticker(f"{sembol}.IS")
-        df = ticker.history(period="1d", interval="1m")
-        if df.empty:
-            return None
-        return float(df["Close"].iloc[-1])
-    except Exception as e:
-        log.warning(f"Fiyat alınamadı ({sembol}): {e}")
+        df = yf.Ticker(f"{sembol}.IS").history(period="1d", interval="1m")
+        return float(df["Close"].iloc[-1]) if not df.empty else None
+    except:
         return None
 
+def portfoy_degeri():
+    toplam = portfoy["bakiye"]
+    for sembol, poz in portfoy["pozisyonlar"].items():
+        fiyat = son_fiyat_al(sembol)
+        toplam += poz["adet"] * (fiyat if fiyat else poz["maliyet"])
+    return toplam
 
 # ─────────────────────────────────────────
 # 📊  TEKNİK ANALİZ
 # ─────────────────────────────────────────
 
-def rsi_hesapla(fiyatlar: pd.Series, periyot: int = 14) -> float:
-    delta = fiyatlar.diff()
-    kazan = delta.clip(lower=0)
-    kayip = -delta.clip(upper=0)
-    rs = kazan.rolling(periyot).mean() / kayip.rolling(periyot).mean()
-    return round(float(100 - (100 / (1 + rs)).iloc[-1]), 1)
-
-def macd_hesapla(fiyatlar: pd.Series):
-    ema12  = fiyatlar.ewm(span=12).mean()
-    ema26  = fiyatlar.ewm(span=26).mean()
-    macd   = ema12 - ema26
-    sinyal = macd.ewm(span=9).mean()
-    return round(float(macd.iloc[-1]), 3), round(float(sinyal.iloc[-1]), 3)
-
-def teknik_analiz(sembol: str) -> dict | None:
+def teknik_analiz(sembol):
     try:
         df = yf.Ticker(f"{sembol}.IS").history(period="3mo", interval="1d")
         if df.empty or len(df) < 30:
             return None
-
         kapanis   = df["Close"]
         son_fiyat = round(float(kapanis.iloc[-1]), 2)
         onceki    = round(float(kapanis.iloc[-2]), 2)
         degisim   = round((son_fiyat - onceki) / onceki * 100, 2)
 
-        rsi            = rsi_hesapla(kapanis)
-        macd, macd_sig = macd_hesapla(kapanis)
-        ma20           = round(float(kapanis.rolling(20).mean().iloc[-1]), 2)
-        ma50           = round(float(kapanis.rolling(50).mean().iloc[-1]), 2)
+        delta = kapanis.diff()
+        rs    = delta.clip(lower=0).rolling(14).mean() / (-delta.clip(upper=0)).rolling(14).mean()
+        rsi   = round(float((100 - 100/(1+rs)).iloc[-1]), 1)
 
-        hacim_ort = float(df["Volume"].rolling(10).mean().iloc[-1])
-        son_hacim = float(df["Volume"].iloc[-1])
-        hacim_guc = "yüksek" if son_hacim > hacim_ort * 1.2 else "normal"
+        ema12 = kapanis.ewm(span=12).mean()
+        ema26 = kapanis.ewm(span=26).mean()
+        macd  = round(float((ema12-ema26).iloc[-1]), 3)
+        msig  = round(float((ema12-ema26).ewm(span=9).mean().iloc[-1]), 3)
+        ma20  = round(float(kapanis.rolling(20).mean().iloc[-1]), 2)
+        ma50  = round(float(kapanis.rolling(50).mean().iloc[-1]), 2)
 
         skor = 0
-        if rsi < 35:   skor += 3
-        elif rsi < 50: skor += 1
-        elif rsi > 65: skor -= 2
-
-        if macd > macd_sig: skor += 2
-        else:               skor -= 1
-
+        if rsi < 35:    skor += 3
+        elif rsi < 50:  skor += 1
+        elif rsi > 65:  skor -= 2
+        if macd > msig: skor += 2
+        else:           skor -= 1
         if son_fiyat > ma20: skor += 1
         else:                skor -= 1
-
         if son_fiyat > ma50: skor += 2
         else:                skor -= 1
 
-        if hacim_guc == "yüksek" and degisim > 0:
-            skor += 1
-
-        if skor >= 5:   sinyal = "AL"
-        elif skor <= 1: sinyal = "SAT"
-        else:           sinyal = "BEKLE"
-
-        return {
-            "sembol": sembol, "fiyat": son_fiyat, "degisim": degisim,
-            "rsi": rsi, "macd": macd, "macd_sig": macd_sig,
-            "ma20": ma20, "ma50": ma50, "hacim": hacim_guc,
-            "skor": skor, "sinyal": sinyal,
-        }
-    except Exception as e:
-        log.warning(f"{sembol} analiz hatası: {e}")
+        sinyal = "AL" if skor >= 5 else ("SAT" if skor <= 1 else "BEKLE")
+        return {"sembol": sembol, "fiyat": son_fiyat, "degisim": degisim,
+                "rsi": rsi, "macd": macd, "macd_sig": msig,
+                "ma20": ma20, "ma50": ma50, "skor": skor, "sinyal": sinyal}
+    except:
         return None
 
-
 # ─────────────────────────────────────────
-# 💰  SANAL İŞLEM FONKSİYONLARI
+# 💰  SANAL İŞLEMLER
 # ─────────────────────────────────────────
 
-def sanal_al(sembol: str, fiyat: float) -> str | None:
-    """
-    AL sinyalinde sanal alım yapar.
-    Maksimum portföyün %10'u kadar pozisyon açar.
-    """
+def sanal_al(sembol, fiyat):
     if sembol in portfoy["pozisyonlar"]:
-        return None  # Zaten pozisyon var
-
-    max_tutar  = portfoy["bakiye"] * MAX_POZISYON_PCT
-    komisyon   = max_tutar * KOMISYON_ORANI
-    net_tutar  = max_tutar - komisyon
-
-    if net_tutar < fiyat:
-        return None  # Yeterli bakiye yok
-
-    adet = int(net_tutar / fiyat)
+        return None
+    max_tutar = portfoy["bakiye"] * MAX_POZISYON_PCT
+    adet      = int((max_tutar * (1 - KOMISYON_ORANI)) / fiyat)
     if adet < 1:
         return None
-
-    toplam_maliyet = adet * fiyat + (adet * fiyat * KOMISYON_ORANI)
-
-    if toplam_maliyet > portfoy["bakiye"]:
+    toplam = adet * fiyat * (1 + KOMISYON_ORANI)
+    if toplam > portfoy["bakiye"]:
         return None
-
-    portfoy["bakiye"] -= toplam_maliyet
+    portfoy["bakiye"] -= toplam
     portfoy["pozisyonlar"][sembol] = {
-        "adet":    adet,
-        "maliyet": fiyat,
-        "tarih":   simdi_str(),
-        "toplam":  toplam_maliyet,
+        "adet": adet, "maliyet": fiyat,
+        "tarih": simdi_str(), "toplam": toplam,
+        "tarih_dt": datetime.now(TZ),
     }
-
     islem_gecmisi.append({
         "tip": "AL", "sembol": sembol, "adet": adet,
-        "fiyat": fiyat, "tarih": simdi_str(),
-        "tutar": toplam_maliyet,
+        "fiyat": fiyat, "tarih": simdi_str(), "tutar": toplam,
+        "komisyon": adet * fiyat * KOMISYON_ORANI,
     })
+    return (f"🟢 *SANAL AL* — {sembol}\n"
+            f"💰 {adet} adet @ {fiyat} ₺\n"
+            f"💸 Toplam: {toplam:.2f} ₺\n"
+            f"🏦 Kalan: {portfoy['bakiye']:.2f} ₺")
 
-    log.info(f"SANAL AL: {sembol} x{adet} @ {fiyat}₺ = {toplam_maliyet:.2f}₺")
-    return (
-        f"🟢 *SANAL AL* — {sembol}\n"
-        f"💰 {adet} adet @ {fiyat} ₺\n"
-        f"💸 Toplam: {toplam_maliyet:.2f} ₺ (komisyon dahil)\n"
-        f"🏦 Kalan bakiye: {portfoy['bakiye']:.2f} ₺"
-    )
-
-
-def sanal_sat(sembol: str, fiyat: float) -> str | None:
-    """SAT sinyalinde sanal satım yapar."""
+def sanal_sat(sembol, fiyat):
     if sembol not in portfoy["pozisyonlar"]:
-        return None  # Pozisyon yok
+        return None
+    poz       = portfoy["pozisyonlar"].pop(sembol)
+    adet      = poz["adet"]
+    gelir     = adet * fiyat
+    komisyon  = gelir * KOMISYON_ORANI
+    net_gelir = gelir - komisyon
+    kar_zarar = net_gelir - poz["toplam"]
+    kar_pct   = (kar_zarar / poz["toplam"]) * 100
 
-    poz          = portfoy["pozisyonlar"].pop(sembol)
-    adet         = poz["adet"]
-    maliyet      = poz["maliyet"]
-    gelir        = adet * fiyat
-    komisyon     = gelir * KOMISYON_ORANI
-    net_gelir    = gelir - komisyon
-    kar_zarar    = net_gelir - poz["toplam"]
-    kar_zarar_pct = (kar_zarar / poz["toplam"]) * 100
+    # Portföyde kalma süresi
+    sure_dk = int((datetime.now(TZ) - poz["tarih_dt"]).total_seconds() / 60)
+    sure_str = f"{sure_dk//60}s {sure_dk%60}dk" if sure_dk >= 60 else f"{sure_dk}dk"
 
     portfoy["bakiye"] += net_gelir
-
     islem_gecmisi.append({
         "tip": "SAT", "sembol": sembol, "adet": adet,
-        "fiyat": fiyat, "tarih": simdi_str(),
-        "tutar": net_gelir, "kar_zarar": kar_zarar,
+        "fiyat": fiyat, "tarih": simdi_str(), "tutar": net_gelir,
+        "komisyon": komisyon, "kar_zarar": kar_zarar,
+        "kar_pct": kar_pct, "sure": sure_str,
+        "maliyet": poz["maliyet"],
     })
-
     emoji = "📈" if kar_zarar >= 0 else "📉"
-    log.info(f"SANAL SAT: {sembol} x{adet} @ {fiyat}₺ | K/Z: {kar_zarar:.2f}₺")
-    return (
-        f"🔴 *SANAL SAT* — {sembol}\n"
-        f"💰 {adet} adet @ {fiyat} ₺\n"
-        f"💸 Net gelir: {net_gelir:.2f} ₺\n"
-        f"{emoji} Kar/Zarar: {kar_zarar:+.2f} ₺ ({kar_zarar_pct:+.1f}%)\n"
-        f"🏦 Yeni bakiye: {portfoy['bakiye']:.2f} ₺"
+    return (f"🔴 *SANAL SAT* — {sembol}\n"
+            f"💰 {adet} adet @ {fiyat} ₺\n"
+            f"⏱️ Portföyde: {sure_str}\n"
+            f"{emoji} K/Z: {kar_zarar:+.2f} ₺ ({kar_pct:+.1f}%)\n"
+            f"🏦 Bakiye: {portfoy['bakiye']:.2f} ₺")
+
+# ─────────────────────────────────────────
+# 🌐  WEB DASHBOARD (Flask)
+# ─────────────────────────────────────────
+
+flask_app = Flask(__name__)
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="refresh" content="60">
+<title>FurkiBot — Paper Trading</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --card: #111118;
+    --border: #1e1e2e;
+    --green: #00ff88;
+    --red: #ff4466;
+    --yellow: #ffd700;
+    --blue: #4488ff;
+    --text: #e0e0f0;
+    --muted: #666680;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    font-family: 'Space Mono', monospace;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--green);
+    letter-spacing: -1px;
+  }
+  .logo span { color: var(--muted); }
+  .live-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+  }
+  .dot {
+    width: 8px; height: 8px;
+    background: var(--green);
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  .grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .card-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    font-family: 'Space Mono', monospace;
+  }
+  .card-value {
+    font-size: 28px;
+    font-weight: 600;
+    font-family: 'Space Mono', monospace;
+    line-height: 1;
+  }
+  .card-sub {
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+  .green { color: var(--green); }
+  .red   { color: var(--red); }
+  .yellow{ color: var(--yellow); }
+  .blue  { color: var(--blue); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th {
+    text-align: left;
+    padding: 10px 12px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 12px;
+    border-bottom: 1px solid #1a1a28;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #15151f; }
+  .badge {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .badge-al  { background: rgba(0,255,136,0.15); color: var(--green); }
+  .badge-sat { background: rgba(255,68,102,0.15); color: var(--red); }
+  .section-title {
+    font-size: 13px;
+    font-family: 'Space Mono', monospace;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 16px;
+  }
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 40px;
+    font-size: 13px;
+  }
+  @media (max-width: 768px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-2 { grid-template-columns: 1fr; }
+    body { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">FURKI<span>BOT</span> // PAPER TRADING</div>
+  <div class="live-badge">
+    <div class="dot"></div>
+    {{ guncelleme }} · Her 60sn yenilenir
+  </div>
+</div>
+
+<!-- Özet Kartlar -->
+<div class="grid-4">
+  <div class="card">
+    <div class="card-label">Portföy Değeri</div>
+    <div class="card-value" style="font-size:22px;">{{ toplam_deger }} ₺</div>
+    <div class="card-sub">Başlangıç: {{ baslangic }} ₺</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Toplam K/Z</div>
+    <div class="card-value {{ 'green' if kz_pozitif else 'red' }}" style="font-size:22px;">
+      {{ toplam_kz }} ₺
+    </div>
+    <div class="card-sub {{ 'green' if kz_pozitif else 'red' }}">{{ toplam_kz_pct }}%</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Nakit Bakiye</div>
+    <div class="card-value blue" style="font-size:22px;">{{ bakiye }} ₺</div>
+    <div class="card-sub">{{ pozisyon_sayisi }} açık pozisyon</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Başarı Oranı</div>
+    <div class="card-value yellow" style="font-size:22px;">{{ basari_orani }}%</div>
+    <div class="card-sub">{{ kazanan }}/{{ toplam_satislar }} işlem kazandı</div>
+  </div>
+</div>
+
+<div class="grid-2">
+
+  <!-- Açık Pozisyonlar -->
+  <div class="card">
+    <div class="section-title">Açık Pozisyonlar</div>
+    {% if pozisyonlar %}
+    <table>
+      <thead>
+        <tr>
+          <th>Hisse</th>
+          <th>Adet</th>
+          <th>Maliyet</th>
+          <th>Süre</th>
+          <th>K/Z</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in pozisyonlar %}
+        <tr>
+          <td style="font-weight:700;">{{ p.sembol }}</td>
+          <td>{{ p.adet }}</td>
+          <td>{{ p.maliyet }} ₺</td>
+          <td style="color:var(--muted);">{{ p.sure }}</td>
+          <td class="{{ 'green' if p.kz >= 0 else 'red' }}">
+            {{ '+' if p.kz >= 0 else '' }}{{ p.kz }} ₺<br>
+            <span style="font-size:10px;">{{ '+' if p.kz_pct >= 0 else '' }}{{ p.kz_pct }}%</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">Açık pozisyon yok</div>
+    {% endif %}
+  </div>
+
+  <!-- Son İşlemler -->
+  <div class="card">
+    <div class="section-title">Son İşlemler</div>
+    {% if islemler %}
+    <table>
+      <thead>
+        <tr>
+          <th>Tip</th>
+          <th>Hisse</th>
+          <th>Fiyat</th>
+          <th>Komisyon</th>
+          <th>K/Z</th>
+          <th>Süre</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in islemler %}
+        <tr>
+          <td><span class="badge {{ 'badge-al' if i.tip == 'AL' else 'badge-sat' }}">{{ i.tip }}</span></td>
+          <td style="font-weight:700;">{{ i.sembol }}</td>
+          <td>{{ i.fiyat }} ₺</td>
+          <td style="color:var(--muted);">{{ i.komisyon }} ₺</td>
+          <td class="{{ 'green' if i.kz and i.kz >= 0 else ('red' if i.kz else '') }}">
+            {% if i.kz is not none %}{{ '+' if i.kz >= 0 else '' }}{{ i.kz }} ₺{% else %}—{% endif %}
+          </td>
+          <td style="color:var(--muted);">{{ i.sure or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">Henüz işlem yok</div>
+    {% endif %}
+  </div>
+
+</div>
+
+</body>
+</html>
+"""
+
+@flask_app.route("/")
+def dashboard():
+    toplam_deger = portfoy_degeri()
+    kz           = toplam_deger - portfoy["baslangic"]
+    kz_pct       = (kz / portfoy["baslangic"]) * 100
+
+    # Açık pozisyonlar
+    poz_listesi = []
+    for sembol, poz in portfoy["pozisyonlar"].items():
+        fiyat    = son_fiyat_al(sembol) or poz["maliyet"]
+        guncel   = poz["adet"] * fiyat
+        kz_poz   = guncel - poz["toplam"]
+        kz_poz_p = (kz_poz / poz["toplam"]) * 100
+        sure_dk  = int((datetime.now(TZ) - poz["tarih_dt"]).total_seconds() / 60)
+        sure_str = f"{sure_dk//60}s {sure_dk%60}dk" if sure_dk >= 60 else f"{sure_dk}dk"
+        poz_listesi.append({
+            "sembol": sembol,
+            "adet":   poz["adet"],
+            "maliyet": poz["maliyet"],
+            "sure":   sure_str,
+            "kz":     round(kz_poz, 2),
+            "kz_pct": round(kz_poz_p, 1),
+        })
+
+    # Son 20 işlem (yeniden eskiye)
+    son_islemler = []
+    for i in reversed(islem_gecmisi[-20:]):
+        son_islemler.append({
+            "tip":     i["tip"],
+            "sembol":  i["sembol"],
+            "fiyat":   i["fiyat"],
+            "komisyon": round(i.get("komisyon", 0), 2),
+            "kz":      round(i["kar_zarar"], 2) if "kar_zarar" in i else None,
+            "sure":    i.get("sure"),
+        })
+
+    satislar  = [i for i in islem_gecmisi if i["tip"] == "SAT"]
+    kazananlar = [i for i in satislar if i.get("kar_zarar", 0) > 0]
+
+    return render_template_string(HTML_TEMPLATE,
+        guncelleme    = simdi_str(),
+        toplam_deger  = f"{toplam_deger:,.2f}",
+        baslangic     = f"{portfoy['baslangic']:,.2f}",
+        toplam_kz     = f"{kz:+,.2f}",
+        toplam_kz_pct = f"{kz_pct:+.2f}",
+        kz_pozitif    = kz >= 0,
+        bakiye        = f"{portfoy['bakiye']:,.2f}",
+        pozisyon_sayisi = len(portfoy["pozisyonlar"]),
+        basari_orani  = round(len(kazananlar)/len(satislar)*100, 1) if satislar else 0,
+        kazanan       = len(kazananlar),
+        toplam_satislar = len(satislar),
+        pozisyonlar   = poz_listesi,
+        islemler      = son_islemler,
     )
 
-
-def portfoy_degeri() -> float:
-    """Mevcut pozisyonların anlık piyasa değeri + nakit bakiye."""
-    toplam = portfoy["bakiye"]
-    for sembol, poz in portfoy["pozisyonlar"].items():
-        fiyat = son_fiyat_al(sembol)
-        if fiyat:
-            toplam += poz["adet"] * fiyat
-        else:
-            toplam += poz["toplam"]  # Fiyat alınamazsa maliyetle hesapla
-    return toplam
-
-
-# ─────────────────────────────────────────
-# 📰  KAP HABERLERİ
-# ─────────────────────────────────────────
-
-def kap_haberleri_getir(sembol: str, limit: int = 2) -> list[str]:
-    try:
-        url = f"https://www.kap.org.tr/tr/api/memberDisclosureQuery/members/{sembol}/disclosures"
-        r   = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-        if r.status_code != 200:
-            return []
-        haberler = []
-        for item in r.json()[:limit]:
-            baslik = item.get("disclosureClass", "") + " - " + item.get("subject", "")
-            tarih  = item.get("publishDate", "")[:10]
-            haberler.append(f"{tarih}: {baslik}")
-        return haberler
-    except:
-        return []
-
-
-# ─────────────────────────────────────────
-# 🤖  CLAUDE AI ANALİZ
-# ─────────────────────────────────────────
-
-def claude_analiz(sembol: str, teknik: dict) -> str:
-    try:
-        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        prompt = f"""
-{sembol} hissesi için kısa yatırım analizi:
-Fiyat: {teknik['fiyat']} TL ({teknik['degisim']:+.2f}%)
-RSI: {teknik['rsi']} | MACD: {teknik['macd']} / {teknik['macd_sig']}
-MA20: {teknik['ma20']} | MA50: {teknik['ma50']}
-Teknik Sinyal: {teknik['sinyal']} (Skor: {teknik['skor']}/10)
-
-2-3 cümle değerlendirme ve AL/SAT/BEKLE karar ver. Türkçe, kısa.
-"""
-        mesaj = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return mesaj.content[0].text
-    except Exception as e:
-        return f"AI yorum yapılamadı: {e}"
-
+def flask_thread():
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False)
 
 # ─────────────────────────────────────────
 # ⏰  OTOMATİK TARAMA
 # ─────────────────────────────────────────
 
-async def bist100_tara(app: Application):
-    """
-    Her 15 dakikada BIST100'ü tarar.
-    AL sinyalinde sanal alım, SAT sinyalinde sanal satım yapar.
-    Borsa kapalıysa çalışmaz.
-    """
+async def bist100_tara(app):
     if not borsa_acik_mi():
         log.info("Borsa kapalı, tarama atlandı.")
         return
-
     log.info("BIST100 taraması başlıyor...")
-    islem_sayisi = 0
-
     for sembol in BIST100:
         teknik = teknik_analiz(sembol)
         if not teknik:
             continue
-
         mesaj = None
-
         if teknik["sinyal"] == "AL":
             mesaj = sanal_al(sembol, teknik["fiyat"])
-
         elif teknik["sinyal"] == "SAT":
             mesaj = sanal_sat(sembol, teknik["fiyat"])
-
         if mesaj:
-            islem_sayisi += 1
             try:
                 await app.bot.send_message(chat_id=CHAT_ID, text=mesaj, parse_mode="Markdown")
-                await asyncio.sleep(1)  # Telegram rate limit
+                await asyncio.sleep(1)
             except Exception as e:
                 log.error(f"Mesaj gönderilemedi: {e}")
 
-    log.info(f"Tarama tamamlandı. {islem_sayisi} işlem yapıldı.")
-
-
-async def gunluk_ozet(app: Application):
-    """Her gün 18:05'te günlük özet gönderir."""
+async def gunluk_ozet(app):
     if not hafta_ici_mi():
         return
-
-    toplam_deger = portfoy_degeri()
-    kar_zarar    = toplam_deger - portfoy["baslangic"]
-    kar_zarar_pct = (kar_zarar / portfoy["baslangic"]) * 100
-
-    bugun_islemler = [i for i in islem_gecmisi
-                      if i["tarih"].startswith(datetime.now(TZ).strftime("%d.%m.%Y"))]
-    bugun_kar = sum(i.get("kar_zarar", 0) for i in bugun_islemler if i["tip"] == "SAT")
-
-    emoji = "📈" if kar_zarar >= 0 else "📉"
-    mesaj = (
-        f"🌆 *Günlük Özet — {datetime.now(TZ).strftime('%d.%m.%Y')}*\n\n"
-        f"💼 Portföy Değeri: {toplam_deger:.2f} ₺\n"
-        f"🏦 Nakit Bakiye: {portfoy['bakiye']:.2f} ₺\n"
-        f"📊 Açık Pozisyon: {len(portfoy['pozisyonlar'])} hisse\n\n"
-        f"{emoji} Toplam K/Z: {kar_zarar:+.2f} ₺ ({kar_zarar_pct:+.1f}%)\n"
-        f"📅 Bugünkü K/Z: {bugun_kar:+.2f} ₺\n"
-        f"🔢 Bugünkü İşlem: {len(bugun_islemler)}\n\n"
-        f"⚠️ _Bu sanal portföydür, gerçek para değildir._"
-    )
+    deger = portfoy_degeri()
+    kz    = deger - portfoy["baslangic"]
+    kz_p  = (kz / portfoy["baslangic"]) * 100
+    mesaj = (f"🌆 *Günlük Özet — {simdi_str()}*\n\n"
+             f"💼 Portföy: {deger:,.2f} ₺\n"
+             f"🏦 Nakit: {portfoy['bakiye']:,.2f} ₺\n"
+             f"{'📈' if kz>=0 else '📉'} Toplam K/Z: {kz:+,.2f} ₺ ({kz_p:+.1f}%)\n"
+             f"📂 Açık Pozisyon: {len(portfoy['pozisyonlar'])}\n\n"
+             f"⚠️ _Sanal portföy_")
     try:
         await app.bot.send_message(chat_id=CHAT_ID, text=mesaj, parse_mode="Markdown")
     except Exception as e:
-        log.error(f"Günlük özet gönderilemedi: {e}")
-
+        log.error(f"Özet gönderilemedi: {e}")
 
 # ─────────────────────────────────────────
 # 🤖  TELEGRAM KOMUTLARI
 # ─────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    mesaj = (
+    await update.message.reply_text(
         "👋 *BIST 100 Paper Trading Botu*\n\n"
-        "🤖 50.000₺ sanal sermaye ile otomatik al-sat yapıyorum!\n\n"
-        "/portfoy — Anlık portföy durumu\n"
-        "/islemler — Son 10 işlem\n"
+        "🌐 Dashboard: Railway URL'inden görüntüle\n\n"
+        "/portfoy — Anlık portföy\n"
+        "/islemler — Son işlemler\n"
         "/performans — Genel performans\n"
         "/sinyal GARAN — Tek hisse analiz\n"
-        "/rapor — BIST100 özet tarama\n"
         "/sifirla — Portföyü sıfırla\n\n"
-        "📡 Her 15 dakikada BIST100 taranır.\n"
-        "⏰ Borsa saatleri: 10:00-18:00 (hafta içi)"
+        "📡 Her 15dk BIST100 taranır (10:00-18:00)",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(mesaj, parse_mode="Markdown")
-
 
 async def cmd_portfoy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Portföy hesaplanıyor...")
-
-    toplam_deger  = portfoy["bakiye"]
-    satirlar      = [f"💼 *Portföy Durumu — {simdi_str()}*\n"]
-    satirlar.append(f"🏦 Nakit: {portfoy['bakiye']:.2f} ₺\n")
-
-    if portfoy["pozisyonlar"]:
-        satirlar.append("📊 *Açık Pozisyonlar:*")
-        for sembol, poz in portfoy["pozisyonlar"].items():
-            fiyat = son_fiyat_al(sembol) or poz["maliyet"]
-            guncel_deger = poz["adet"] * fiyat
-            kar_zarar    = guncel_deger - poz["toplam"]
-            kar_pct      = (kar_zarar / poz["toplam"]) * 100
-            emoji        = "🟢" if kar_zarar >= 0 else "🔴"
-            satirlar.append(
-                f"{emoji} *{sembol}* | {poz['adet']} adet | "
-                f"Maliyet: {poz['maliyet']}₺ | Şu an: {fiyat:.2f}₺ | "
-                f"{kar_zarar:+.2f}₺ ({kar_pct:+.1f}%)"
-            )
-            toplam_deger += guncel_deger
-    else:
-        satirlar.append("📭 Açık pozisyon yok.")
-
-    kar_zarar_toplam = toplam_deger - portfoy["baslangic"]
-    kar_pct_toplam   = (kar_zarar_toplam / portfoy["baslangic"]) * 100
-    emoji_toplam     = "📈" if kar_zarar_toplam >= 0 else "📉"
-
-    satirlar.append(f"\n💰 *Toplam Portföy: {toplam_deger:.2f} ₺*")
-    satirlar.append(f"{emoji_toplam} Başlangıçtan bu yana: {kar_zarar_toplam:+.2f} ₺ ({kar_pct_toplam:+.1f}%)")
-    satirlar.append("\n⚠️ _Sanal portföy — gerçek para değil_")
-
+    deger = portfoy_degeri()
+    kz    = deger - portfoy["baslangic"]
+    kz_p  = (kz / portfoy["baslangic"]) * 100
+    satirlar = [f"💼 *Portföy — {simdi_str()}*\n",
+                f"🏦 Nakit: {portfoy['bakiye']:,.2f} ₺"]
+    for sembol, poz in portfoy["pozisyonlar"].items():
+        fiyat = son_fiyat_al(sembol) or poz["maliyet"]
+        kz_p2 = ((poz["adet"]*fiyat - poz["toplam"]) / poz["toplam"]) * 100
+        e = "🟢" if kz_p2 >= 0 else "🔴"
+        satirlar.append(f"{e} *{sembol}* {poz['adet']} adet | {kz_p2:+.1f}%")
+    satirlar.append(f"\n💰 Toplam: {deger:,.2f} ₺")
+    satirlar.append(f"{'📈' if kz>=0 else '📉'} K/Z: {kz:+,.2f} ₺ ({kz_p:+.1f}%)")
     await update.message.reply_text("\n".join(satirlar), parse_mode="Markdown")
-
 
 async def cmd_islemler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not islem_gecmisi:
-        await update.message.reply_text("📭 Henüz işlem yapılmadı.")
+        await update.message.reply_text("📭 Henüz işlem yok.")
         return
-
-    son10 = islem_gecmisi[-10:][::-1]
-    satirlar = ["📋 *Son İşlemler*\n"]
-    for i in son10:
-        emoji = "🟢" if i["tip"] == "AL" else "🔴"
-        kz    = f" | {i['kar_zarar']:+.2f}₺" if "kar_zarar" in i else ""
-        satirlar.append(
-            f"{emoji} *{i['tip']}* {i['sembol']} — "
-            f"{i['adet']} adet @ {i['fiyat']}₺{kz}\n"
-            f"🕐 {i['tarih']}"
-        )
-    await update.message.reply_text("\n\n".join(satirlar), parse_mode="Markdown")
-
+    satirlar = ["📋 *Son 10 İşlem*\n"]
+    for i in reversed(islem_gecmisi[-10:]):
+        e  = "🟢" if i["tip"] == "AL" else "🔴"
+        kz = f" | {i['kar_zarar']:+.0f}₺" if "kar_zarar" in i else ""
+        satirlar.append(f"{e} *{i['tip']}* {i['sembol']} {i['adet']}x{i['fiyat']}₺{kz} — {i['tarih']}")
+    await update.message.reply_text("\n".join(satirlar), parse_mode="Markdown")
 
 async def cmd_performans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    toplam_deger = portfoy_degeri()
-    kar_zarar    = toplam_deger - portfoy["baslangic"]
-    kar_pct      = (kar_zarar / portfoy["baslangic"]) * 100
-
-    tum_satislar    = [i for i in islem_gecmisi if i["tip"] == "SAT"]
-    kazanan         = [i for i in tum_satislar if i.get("kar_zarar", 0) > 0]
-    kaybeden        = [i for i in tum_satislar if i.get("kar_zarar", 0) <= 0]
-    toplam_kar      = sum(i.get("kar_zarar", 0) for i in kazanan)
-    toplam_zarar    = sum(i.get("kar_zarar", 0) for i in kaybeden)
-    basari_orani    = (len(kazanan) / len(tum_satislar) * 100) if tum_satislar else 0
-
-    emoji = "📈" if kar_zarar >= 0 else "📉"
-    mesaj = (
-        f"🏆 *Performans Raporu*\n\n"
-        f"💰 Başlangıç: {portfoy['baslangic']:.2f} ₺\n"
-        f"💼 Güncel Değer: {toplam_deger:.2f} ₺\n"
-        f"{emoji} Toplam K/Z: {kar_zarar:+.2f} ₺ ({kar_pct:+.1f}%)\n\n"
-        f"📊 *İşlem İstatistikleri*\n"
-        f"Toplam İşlem: {len(islem_gecmisi)}\n"
-        f"Kapatılan Pozisyon: {len(tum_satislar)}\n"
-        f"✅ Kazanan: {len(kazanan)} ({basari_orani:.1f}%)\n"
-        f"❌ Kaybeden: {len(kaybeden)}\n"
-        f"📈 Toplam Kar: {toplam_kar:+.2f} ₺\n"
-        f"📉 Toplam Zarar: {toplam_zarar:+.2f} ₺\n"
-        f"🏦 Nakit Bakiye: {portfoy['bakiye']:.2f} ₺\n"
-        f"📂 Açık Pozisyon: {len(portfoy['pozisyonlar'])}\n\n"
-        f"⚠️ _Sanal portföy — gerçek para değil_"
-    )
+    deger    = portfoy_degeri()
+    kz       = deger - portfoy["baslangic"]
+    kz_p     = (kz / portfoy["baslangic"]) * 100
+    satislar = [i for i in islem_gecmisi if i["tip"] == "SAT"]
+    kazanan  = [i for i in satislar if i.get("kar_zarar", 0) > 0]
+    oran     = len(kazanan)/len(satislar)*100 if satislar else 0
+    mesaj = (f"🏆 *Performans*\n\n"
+             f"💰 Başlangıç: {portfoy['baslangic']:,.0f} ₺\n"
+             f"💼 Güncel: {deger:,.2f} ₺\n"
+             f"{'📈' if kz>=0 else '📉'} K/Z: {kz:+,.2f} ₺ ({kz_p:+.1f}%)\n\n"
+             f"✅ Kazanan: {len(kazanan)}/{len(satislar)} ({oran:.1f}%)\n"
+             f"📂 Açık Pozisyon: {len(portfoy['pozisyonlar'])}\n"
+             f"🔢 Toplam İşlem: {len(islem_gecmisi)}")
     await update.message.reply_text(mesaj, parse_mode="Markdown")
-
 
 async def cmd_sinyal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -507,88 +643,57 @@ async def cmd_sinyal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     sembol = ctx.args[0].upper()
     await update.message.reply_text(f"⏳ {sembol} analiz ediliyor...")
-    teknik = teknik_analiz(sembol)
-    if not teknik:
+    t = teknik_analiz(sembol)
+    if not t:
         await update.message.reply_text(f"⚠️ {sembol}: veri alınamadı")
         return
-
-    emoji  = {"AL": "🟢", "SAT": "🔴", "BEKLE": "🟡"}.get(teknik["sinyal"], "⚪")
-    yorum  = claude_analiz(sembol, teknik)
-    rapor  = (
-        f"{emoji} *{sembol}* — {teknik['sinyal']}\n"
-        f"💰 {teknik['fiyat']} ₺ ({teknik['degisim']:+.2f}%)\n"
-        f"📊 RSI: {teknik['rsi']} | MACD: {'↑' if teknik['macd'] > teknik['macd_sig'] else '↓'}\n"
-        f"📈 MA20: {teknik['ma20']} | MA50: {teknik['ma50']}\n"
-        f"🎯 Skor: {teknik['skor']}/10\n\n"
-        f"🤖 *AI Yorum:*\n{yorum}"
+    e = {"AL":"🟢","SAT":"🔴","BEKLE":"🟡"}.get(t["sinyal"],"⚪")
+    await update.message.reply_text(
+        f"{e} *{sembol}* — {t['sinyal']}\n"
+        f"💰 {t['fiyat']} ₺ ({t['degisim']:+.2f}%)\n"
+        f"📊 RSI: {t['rsi']} | MACD: {'↑' if t['macd']>t['macd_sig'] else '↓'}\n"
+        f"📈 MA20: {t['ma20']} | MA50: {t['ma50']}\n"
+        f"🎯 Skor: {t['skor']}/10",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(rapor, parse_mode="Markdown")
-
-
-async def cmd_rapor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ BIST100 taranıyor, biraz bekle (bu uzun sürebilir)...")
-    app = ctx.application
-    await bist100_tara(app)
-    await update.message.reply_text("✅ Tarama tamamlandı! /portfoy ile durumu görebilirsin.")
-
 
 async def cmd_sifirla(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     portfoy["bakiye"]      = BASLANGIC_BAKIYE
     portfoy["baslangic"]   = BASLANGIC_BAKIYE
     portfoy["pozisyonlar"] = {}
     islem_gecmisi.clear()
-    await update.message.reply_text(
-        f"♻️ Portföy sıfırlandı!\n"
-        f"💰 Yeni bakiye: {BASLANGIC_BAKIYE:,.2f} ₺"
-    )
-
-
-async def cmd_yardim(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await cmd_start(update, ctx)
-
+    await update.message.reply_text(f"♻️ Sıfırlandı! Yeni bakiye: {BASLANGIC_BAKIYE:,.0f} ₺")
 
 # ─────────────────────────────────────────
-# 🚀  ANA FONKSİYON
+# 🚀  MAIN
 # ─────────────────────────────────────────
 
 def main():
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN, CHAT_ID ve CLAUDE_API_KEY environment variable olarak tanımlanmalı!")
+        print("❌ Environment variable'lar eksik!")
         return
 
-    log.info("BIST 100 Paper Trading Botu başlatılıyor...")
+    # Flask'ı ayrı thread'de başlat
+    t = threading.Thread(target=flask_thread, daemon=True)
+    t.start()
+    log.info(f"Dashboard başlatıldı: http://0.0.0.0:{PORT}")
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("portfoy",    cmd_portfoy))
     app.add_handler(CommandHandler("islemler",   cmd_islemler))
     app.add_handler(CommandHandler("performans", cmd_performans))
     app.add_handler(CommandHandler("sinyal",     cmd_sinyal))
-    app.add_handler(CommandHandler("rapor",      cmd_rapor))
     app.add_handler(CommandHandler("sifirla",    cmd_sifirla))
-    app.add_handler(CommandHandler("yardim",     cmd_yardim))
 
     jq = app.job_queue
+    jq.run_repeating(lambda ctx: asyncio.create_task(bist100_tara(app)),
+                     interval=TARAMA_ARALIK, first=60)
+    jq.run_daily(lambda ctx: asyncio.create_task(gunluk_ozet(app)),
+                 time=dtime(18, 5, tzinfo=TZ), days=(0,1,2,3,4))
 
-    # Her 15 dakikada BIST100 tara (borsa saatleri 10:00-18:00)
-    jq.run_repeating(
-        lambda ctx: asyncio.create_task(bist100_tara(app)),
-        interval=TARAMA_ARALIK, first=60
-    )
-
-    # Her gün 18:05'te günlük özet
-    jq.run_daily(
-        lambda ctx: asyncio.create_task(gunluk_ozet(app)),
-        time=dtime(18, 5, tzinfo=TZ),
-        days=(0, 1, 2, 3, 4)
-    )
-
-    log.info(f"BIST100 takip listesi: {len(BIST100)} hisse")
-    log.info(f"Sanal başlangıç bakiyesi: {BASLANGIC_BAKIYE:,.0f} ₺")
-    log.info("Bot aktif! Telegram'dan /start ile başla.")
+    log.info(f"Bot aktif! {len(BIST100)} hisse takipte.")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
