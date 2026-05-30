@@ -51,12 +51,12 @@ TZ = ZoneInfo("Europe/Istanbul")
 # Yeni eklenenler: TUPRS, ENKAI, DSTKF, ASTOR, SAHOL, VAKBN, PETKM, TRALT
 
 BIST30 = [
-    "AKBNK", "ARCLK", "ASELS", "ASTOR", "BIMAS",
-    "DSTKF", "EKGYO", "ENKAI", "EREGL", "FROTO",
-    "GARAN", "GUBRF", "ISCTR", "KCHOL", "KRDMD",
-    "MGROS", "OYAKC", "PETKM", "PGSUS", "SAHOL",
-    "SASA",  "SISE",  "TAVHL", "TCELL", "THYAO",
-    "TOASO", "TRALT", "TTKOM", "TUPRS", "YKBNK",
+    "AEFES", "AKBNK", "ASELS", "ASTOR", "BIMAS",
+    "CIMSA", "EKGYO", "ENKAI", "EREGL", "FROTO",
+    "GARAN", "HEKTS", "ISCTR", "KCHOL", "KRDMD",
+    "MGROS", "PETKM", "PGSUS", "SAHOL", "SASA",
+    "SISE",  "TAVHL", "TCELL", "THYAO", "TOASO",
+    "TRALT", "TTKOM", "TUPRS", "ULKER", "YKBNK",
 ]
 
 # Aktif pozisyonlar: {"GARAN": {"giris": 130.5, "tarih": "..."}}
