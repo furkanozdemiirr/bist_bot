@@ -40,7 +40,7 @@ import anthropic
 
 BOT_TOKEN      = "8412980491:AAFQdm_A8OWOpf70JwlKKHYN_QDe4IVsygw"        # @BotFather'dan alın
 CHAT_ID        = "628255204"          # @userinfobot'tan alın
-CLAUDE_API_KEY = "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"   # console.anthropic.com'dan alın
+CLAUDE_API_KEY = "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"   # console.anthropic.com'dan alın
 
 TZ = ZoneInfo("Europe/Istanbul")
 
