@@ -104,8 +104,8 @@ def portfoy_degeri():
 
 def teknik_analiz(sembol):
     try:
-        df = yf.Ticker(f"{sembol}.IS").history(period="3mo", interval="1d")
-        if df.empty or len(df) < 30:
+        df = yf.Ticker(f"{sembol}.IS").history(period="6mo", interval="1d", auto_adjust=True)
+        if df.empty or len(df) < 20:
             return None
         kapanis   = df["Close"]
         son_fiyat = round(float(kapanis.iloc[-1]), 2)
