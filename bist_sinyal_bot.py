@@ -599,9 +599,9 @@ async def cmd_performans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(mesaj, parse_mode="Markdown")
 
 async def cmd_sinyal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not t:
-    await update.message.reply_text(f"⚠️ {sembol}: veri alınamadı")
-    return
+    if not ctx.args:
+        await update.message.reply_text("Kullanım: /sinyal GARAN")
+        return
     sembol = ctx.args[0].upper()
     await update.message.reply_text(f"⏳ {sembol} analiz ediliyor...")
     t = teknik_analiz(sembol)
