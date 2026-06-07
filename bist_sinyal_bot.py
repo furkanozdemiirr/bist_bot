@@ -600,11 +600,7 @@ async def cmd_performans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_sinyal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not t:
-    try:
-        df = yf.Ticker(f"{sembol}.IS").history(period="6mo", interval="1d")
-        await update.message.reply_text(f"⚠️ {sembol}: veri alınamadı\nDF boyutu: {len(df)}\nSütunlar: {list(df.columns)}")
-    except Exception as ex:
-        await update.message.reply_text(f"⚠️ {sembol}: HATA → {str(ex)[:200]}")
+    await update.message.reply_text(f"⚠️ {sembol}: veri alınamadı")
     return
     sembol = ctx.args[0].upper()
     await update.message.reply_text(f"⏳ {sembol} analiz ediliyor...")
