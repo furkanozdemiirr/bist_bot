@@ -86,8 +86,12 @@ def simdi_str():
 
 def son_fiyat_al(sembol):
     try:
-        df = yf.Ticker(f"{sembol}.IS").history(period="5d", interval="1d")
-        return float(df["Close"].iloc[-1]) if not df.empty else None
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{sembol}.IS?interval=1d&range=5d"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10).json()
+        closes = r["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        return float(closes[-1]) if closes else None
     except:
         return None
 def portfoy_degeri():
@@ -106,17 +110,21 @@ ALPHA_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
 def teknik_analiz(sembol):
     try:
         import time
-        time.sleep(1)
-        yf.set_tz_cache_location("/tmp")
-        ticker = yf.Ticker(f"{sembol}.IS")
-        ticker._session = requests.Session()
-        ticker._session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        df = ticker.history(period="6mo", interval="1d")
-        if df.empty or len(df) < 20:
+        time.sleep(0.5)
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{sembol}.IS?interval=1d&range=6mo"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10).json()
+        timestamps = r["chart"]["result"][0]["timestamp"]
+        closes = r["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        volumes = r["chart"]["result"][0]["indicators"]["quote"][0]["volume"]
+
+        closes = [c for c in closes if c is not None]
+        volumes = [v for v in volumes if v is not None]
+
+        if len(closes) < 20:
             return None
-        kapanis = df["Close"]
+
+        kapanis = pd.Series(closes)
         son_fiyat = round(float(kapanis.iloc[-1]), 2)
         onceki = round(float(kapanis.iloc[-2]), 2)
         degisim = round((son_fiyat - onceki) / onceki * 100, 2)
@@ -132,8 +140,9 @@ def teknik_analiz(sembol):
         ma20 = round(float(kapanis.rolling(20).mean().iloc[-1]), 2)
         ma50 = round(float(kapanis.rolling(50).mean().iloc[-1]), 2)
 
-        hacim_ort = float(df["Volume"].rolling(10).mean().iloc[-1])
-        son_hacim = float(df["Volume"].iloc[-1])
+        vol_series = pd.Series(volumes)
+        hacim_ort = float(vol_series.rolling(10).mean().iloc[-1])
+        son_hacim = float(vol_series.iloc[-1])
 
         skor = 0
         if rsi < 35:         skor += 3
