@@ -86,16 +86,10 @@ def simdi_str():
 
 def son_fiyat_al(sembol):
     try:
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={sembol}.IS&outputsize=compact&apikey={ALPHA_KEY}"
-        r = requests.get(url, timeout=10).json()
-        ts = r.get("Time Series (Daily)")
-        if not ts:
-            return None
-        son = list(ts.values())[0]
-        return float(son["4. close"])
+        df = yf.Ticker(f"{sembol}.IS").history(period="5d", interval="1d")
+        return float(df["Close"].iloc[-1]) if not df.empty else None
     except:
         return None
-
 def portfoy_degeri():
     toplam = portfoy["bakiye"]
     for sembol, poz in portfoy["pozisyonlar"].items():
@@ -111,17 +105,12 @@ ALPHA_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
 
 def teknik_analiz(sembol):
     try:
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={sembol}.IS&outputsize=compact&apikey={ALPHA_KEY}"
-        r = requests.get(url, timeout=10).json()
-        ts = r.get("Time Series (Daily)")
-        if not ts or len(ts) < 30:
-            log.error(f"${sembol}.IS: veri yok")
+        import yfinance as yf
+        ticker = yf.Ticker(f"{sembol}.IS")
+        df = ticker.history(period="6mo", interval="1d")
+        if df.empty or len(df) < 20:
+            log.error(f"${sembol}.IS: veri yok, satır sayısı: {len(df)}")
             return None
-        df = pd.DataFrame(ts).T
-        df = df.astype(float)
-        df.columns = ["Open","High","Low","Close","Volume"]
-        df = df.sort_index()
-
         kapanis = df["Close"]
         son_fiyat = round(float(kapanis.iloc[-1]), 2)
         onceki = round(float(kapanis.iloc[-2]), 2)
@@ -161,7 +150,7 @@ def teknik_analiz(sembol):
             "ma20": ma20, "ma50": ma50, "skor": skor, "sinyal": sinyal,
         }
     except Exception as e:
-        log.error(f"${sembol}.IS: {e}")
+        log.error(f"${sembol}.IS hata: {e}")
         return None
 
 # ─────────────────────────────────────────
