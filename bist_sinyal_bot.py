@@ -86,8 +86,13 @@ def simdi_str():
 
 def son_fiyat_al(sembol):
     try:
-        df = yf.Ticker(f"{sembol}.IS").history(period="1d", interval="1m")
-        return float(df["Close"].iloc[-1]) if not df.empty else None
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={sembol}.IS&outputsize=compact&apikey={ALPHA_KEY}"
+        r = requests.get(url, timeout=10).json()
+        ts = r.get("Time Series (Daily)")
+        if not ts:
+            return None
+        son = list(ts.values())[0]
+        return float(son["4. close"])
     except:
         return None
 
@@ -102,26 +107,36 @@ def portfoy_degeri():
 # 📊  TEKNİK ANALİZ
 # ─────────────────────────────────────────
 
+ALPHA_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
+
 def teknik_analiz(sembol):
     try:
-        df = yf.Ticker(f"{sembol}.IS").history(period="6mo", interval="1d", auto_adjust=True)
-        if df.empty or len(df) < 20:
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={sembol}.IS&outputsize=compact&apikey={ALPHA_KEY}"
+        r = requests.get(url, timeout=10).json()
+        ts = r.get("Time Series (Daily)")
+        if not ts or len(ts) < 30:
+            log.error(f"${sembol}.IS: veri yok")
             return None
-        kapanis   = df["Close"]
+        df = pd.DataFrame(ts).T
+        df = df.astype(float)
+        df.columns = ["Open","High","Low","Close","Volume"]
+        df = df.sort_index()
+
+        kapanis = df["Close"]
         son_fiyat = round(float(kapanis.iloc[-1]), 2)
-        onceki    = round(float(kapanis.iloc[-2]), 2)
-        degisim   = round((son_fiyat - onceki) / onceki * 100, 2)
+        onceki = round(float(kapanis.iloc[-2]), 2)
+        degisim = round((son_fiyat - onceki) / onceki * 100, 2)
 
         delta = kapanis.diff()
-        rs    = delta.clip(lower=0).rolling(14).mean() / (-delta.clip(upper=0)).rolling(14).mean()
-        rsi   = round(float((100 - 100/(1+rs)).iloc[-1]), 1)
+        rs = delta.clip(lower=0).rolling(14).mean() / (-delta.clip(upper=0)).rolling(14).mean()
+        rsi = round(float((100 - 100/(1+rs)).iloc[-1]), 1)
 
         ema12 = kapanis.ewm(span=12).mean()
         ema26 = kapanis.ewm(span=26).mean()
-        macd  = round(float((ema12-ema26).iloc[-1]), 3)
-        msig  = round(float((ema12-ema26).ewm(span=9).mean().iloc[-1]), 3)
-        ma20  = round(float(kapanis.rolling(20).mean().iloc[-1]), 2)
-        ma50  = round(float(kapanis.rolling(50).mean().iloc[-1]), 2)
+        macd = round(float((ema12-ema26).iloc[-1]), 3)
+        msig = round(float((ema12-ema26).ewm(span=9).mean().iloc[-1]), 3)
+        ma20 = round(float(kapanis.rolling(20).mean().iloc[-1]), 2)
+        ma50 = round(float(kapanis.rolling(50).mean().iloc[-1]), 2)
 
         hacim_ort = float(df["Volume"].rolling(10).mean().iloc[-1])
         son_hacim = float(df["Volume"].iloc[-1])
@@ -145,7 +160,8 @@ def teknik_analiz(sembol):
             "rsi": rsi, "macd": macd, "macd_sig": msig,
             "ma20": ma20, "ma50": ma50, "skor": skor, "sinyal": sinyal,
         }
-    except:
+    except Exception as e:
+        log.error(f"${sembol}.IS: {e}")
         return None
 
 # ─────────────────────────────────────────
