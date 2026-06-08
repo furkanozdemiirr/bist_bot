@@ -531,9 +531,7 @@ async def bist100_tara(app):
             if t["fiyat"] < maliyet * 0.95:
                 mesaj = sanal_sat(sembol, t["fiyat"])
                 if mesaj:
-                    mesaj = "🛑 *STOP LOSS* — " + mesaj
-        elif t["sinyal"] == "SAT":
-            mesaj = sanal_sat(sembol, t["fiyat"])    
+                    mesaj = "🛑 *STOP LOSS* — " + mesaj   
         elif t["sinyal"] == "SAT":
             mesaj = sanal_sat(sembol, t["fiyat"])
         if mesaj:
