@@ -105,11 +105,16 @@ ALPHA_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
 
 def teknik_analiz(sembol):
     try:
-        import yfinance as yf
+        import time
+        time.sleep(1)
+        yf.set_tz_cache_location("/tmp")
         ticker = yf.Ticker(f"{sembol}.IS")
+        ticker._session = requests.Session()
+        ticker._session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
         df = ticker.history(period="6mo", interval="1d")
         if df.empty or len(df) < 20:
-            log.error(f"${sembol}.IS: veri yok, satır sayısı: {len(df)}")
             return None
         kapanis = df["Close"]
         son_fiyat = round(float(kapanis.iloc[-1]), 2)
