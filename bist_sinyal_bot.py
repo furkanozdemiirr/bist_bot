@@ -526,12 +526,17 @@ async def bist100_tara(app):
         if t["sinyal"] == "AL":
             mesaj = sanal_al(sembol, t["fiyat"])
         # Stop loss kontrolü (%5)
+        # Stop loss (%3) ve Take profit (%5)
         if sembol in portfoy["pozisyonlar"]:
             maliyet = portfoy["pozisyonlar"][sembol]["maliyet"]
-            if t["fiyat"] < maliyet * 0.95:
+            if t["fiyat"] < maliyet * 0.97:
                 mesaj = sanal_sat(sembol, t["fiyat"])
                 if mesaj:
-                    mesaj = "🛑 *STOP LOSS* — " + mesaj   
+                    mesaj = "🛑 *STOP LOSS* — " + mesaj
+            elif t["fiyat"] > maliyet * 1.05:
+                mesaj = sanal_sat(sembol, t["fiyat"])
+                if mesaj:
+                    mesaj = "🎯 *TAKE PROFIT* — " + mesaj
         elif t["sinyal"] == "SAT":
             mesaj = sanal_sat(sembol, t["fiyat"])
         if mesaj:
